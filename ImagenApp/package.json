@@ -5,32 +5,42 @@
   "scripts": {
     "android": "react-native run-android",
     "ios": "react-native run-ios",
-    "windows": "react-native run-windows",
+    "windows": "npx @react-native-community/cli run-windows",
     "macos": "react-native run-macos",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest"
   },
   "dependencies": {
+    "@dr.pogodin/react-native-fs": "2.22.1",
     "@react-native-async-storage/async-storage": "^1.21.0",
+    "@react-native-community/cameraroll": "^4.1.2",
     "@react-native-community/datetimepicker": "^7.6.2",
+    "@react-native-masked-view/masked-view": "^0.3.2",
     "@react-native-picker/picker": "^2.6.1",
     "@react-navigation/native": "^6.1.9",
     "@react-navigation/stack": "^6.3.20",
     "@supabase/supabase-js": "^2.39.3",
+    "fbjs": "^3.0.5",
     "react": "18.2.0",
-    "react-native": "0.73.4",
+    "react-native": "^0.78.0",
     "react-native-fs": "^2.20.0",
     "react-native-gesture-handler": "^2.15.0",
+    "react-native-linear-gradient": "^2.8.3",
     "react-native-macos": "^0.73.0",
+    "react-native-permissions": "^5.3.0",
     "react-native-safe-area-context": "^4.9.0",
     "react-native-screens": "^3.29.0",
-    "react-native-windows": "0.73.4"
+    "react-native-svg": "^15.11.2",
+    "react-native-url-polyfill": "^2.0.0",
+    "react-native-windows": "0.78.4"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
     "@babel/preset-env": "^7.20.0",
+    "@babel/preset-typescript": "^7.27.0",
     "@babel/runtime": "^7.20.0",
+    "@react-native-windows/cli": "^0.78.2",
     "@react-native/babel-preset": "0.73.21",
     "@react-native/eslint-config": "0.73.2",
     "@react-native/metro-config": "0.73.5",
@@ -40,10 +50,19 @@
     "babel-jest": "^29.6.3",
     "eslint": "^8.19.0",
     "jest": "^29.6.3",
+    "metro-config": "^0.80.12",
     "prettier": "2.8.8",
+    "react-native-make": "^1.0.1",
     "typescript": "5.0.4"
   },
   "engines": {
     "node": ">=18"
+  },
+  "react-native-windows": {
+    "init-windows": {
+      "name": "ImagenApp",
+      "namespace": "ImagenApp",
+      "template": "old/uwp-cpp-app"
+    }
   }
 }

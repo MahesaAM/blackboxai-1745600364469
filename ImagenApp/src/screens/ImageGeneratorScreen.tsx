@@ -1,607 +1,530 @@
-import React, { useState, useEffect, useRef } from "react";
+// ImageGeneratorScreen.js
+import React, { useState, useEffect, useRef } from 'react';
 import {
+  SafeAreaView,
   View,
   Text,
   TextInput,
   TouchableOpacity,
   ScrollView,
-  StyleSheet,
-  Platform,
-  ActivityIndicator,
   Image,
+  StyleSheet,
+  ActivityIndicator,
+  PermissionsAndroid,
+  Platform,
+  Alert,
+  Switch,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { StackNavigationProp } from '@react-navigation/stack';
-import * as FileSystem from 'react-native-fs';
-import { RootStackParamList } from '../../App';
+import CameraRoll from '@react-native-community/cameraroll';
+import RNFS from 'react-native-fs';
+import { useNavigation } from '@react-navigation/native';
+import { supabase } from '../lib/supabase';
 
 const ASPECT_OPTIONS = [
-  { label: "Landscape 4:3", value: "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE" },
-  { label: "Landscape", value: "IMAGE_ASPECT_RATIO_LANDSCAPE" },
-  { label: "Portrait 3:4", value: "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR" },
-  { label: "Portrait", value: "IMAGE_ASPECT_RATIO_PORTRAIT" },
-  { label: "Square", value: "IMAGE_ASPECT_RATIO_SQUARE" },
+  { label: 'Landscape 4:3', value: 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE' },
+  { label: 'Landscape', value: 'IMAGE_ASPECT_RATIO_LANDSCAPE' },
+  { label: 'Portrait 3:4', value: 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR' },
+  { label: 'Portrait', value: 'IMAGE_ASPECT_RATIO_PORTRAIT' },
+  { label: 'Square', value: 'IMAGE_ASPECT_RATIO_SQUARE' },
 ];
 
-type ImageGeneratorScreenProps = {
-  navigation: StackNavigationProp<RootStackParamList, 'ImageGenerator'>;
-};
-
-type LogEntry = {
-  id: number;
-  prompt: string;
-  status: 'pending' | 'success' | 'error';
-  message?: string;
-  images?: Array<{ url: string; filename: string }>;
-};
-
-const ImageGeneratorScreen: React.FC<ImageGeneratorScreenProps> = ({ navigation }) => {
+export default function ImageGeneratorScreen() {
+  const navigation = useNavigation();
   const [prompts, setPrompts] = useState('');
   const [aspect, setAspect] = useState(ASPECT_OPTIONS[0].value);
   const [autoDownload, setAutoDownload] = useState(true);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [bearerToken, setBearerToken] = useState('');
+  const [logs, setLogs] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [expiresAtDisplay, setExpiresAtDisplay] = useState('');
   const cancelRef = useRef(false);
-  const bottomRef = useRef<ScrollView>(null);
-  const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const scrollRef = useRef(null);
+  const [expiresAtDisplay, setExpiresAtDisplay] = useState('');
+
+  // direktori simpan
+  const [saveDir, setSaveDir] = useState(RNFS.DocumentDirectoryPath);
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [entries, setEntries] = useState([]);
+  const [currentDir, setCurrentDir] = useState(saveDir);
 
   useEffect(() => {
-    bottomRef.current?.scrollToEnd({ animated: true });
+    scrollRef.current?.scrollToEnd({ animated: true });
   }, [logs]);
 
+  // baca token & expiry
   useEffect(() => {
-    const checkAuth = async () => {
+    (async () => {
+      // 1. Ambil username + token dari storage
+      const username = await AsyncStorage.getItem('username');
       const token = await AsyncStorage.getItem('token');
-      const expiresAt = await AsyncStorage.getItem('expiresAt');
-
-      if (!token) {
-        navigation.replace('Login');
-      } else if (token === 'admin-token') {
-        navigation.replace('Admin');
-      } else if (expiresAt && new Date(expiresAt) < new Date()) {
-        await AsyncStorage.multiRemove(['token', 'expiresAt']);
-        navigation.replace('Login');
-      } else if (expiresAt) {
-        try {
-          const date = new Date(expiresAt);
-          setExpiresAtDisplay(
-            date.toLocaleDateString('id-ID', {
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric',
-            })
-          );
-        } catch {
-          setExpiresAtDisplay(expiresAt);
-        }
+      if (!token || !username) {
+        return navigation.replace('Login');
       }
-    };
-    checkAuth();
-  }, []);
 
-  const generateForPrompts = async (lines: string[]) => {
-    if (lines.length === 0) {
-      setLogs((l) => [
-        ...l,
+      // 2. Query Supabase untuk field expiresAt user ini
+      const { data, error } = await supabase
+        .from('users_imagen')
+        .select('expiresAt')
+        .eq('username', username)
+        .single();
+
+      if (error || !data) {
+        // kalau gagal baca, anggap sesi invalid
+        await AsyncStorage.multiRemove(['token', 'username', 'expiresAt']);
+        return navigation.replace('Login');
+      }
+
+      // 3. Cek tanggal kadaluarsa
+      const expiresAt = new Date(data.expiresAt);
+      if (expiresAt < new Date()) {
+        // sudah lewat → hapus storage & redirect ke Login
+        await AsyncStorage.multiRemove(['token', 'username', 'expiresAt']);
+        Alert.alert('Peringatan', `Langganan kamu sudah habis`);
+        return navigation.replace('Login');
+      }
+
+      // 4. Kalau belum expired, simpan ke state untuk ditampilkan
+      setExpiresAtDisplay(
+        expiresAt.toLocaleDateString('id-ID', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        })
+      );
+    })();
+  }, [navigation]);
+
+  const API_URL = "https://aisandbox-pa.googleapis.com/v1:runImageFx";
+
+  // Android storage permission
+  const ensurePermission = async () => {
+    if (Platform.OS === 'android') {
+      const r = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
         {
-          id: Date.now(),
-          prompt: '',
-          status: 'error',
-          message: '⚠️ Prompt belum diisi.',
-        },
-      ]);
+          title: 'Izin Simpan',
+          message: 'Butuh izin simpan gambar',
+          buttonPositive: 'OK'
+        }
+      );
+      if (r !== PermissionsAndroid.RESULTS.GRANTED) {
+        throw new Error('Izin penyimpanan ditolak');
+      }
+    }
+  };
+
+  // Simpan gambar
+  const saveImage = async (dataUrl, filename) => {
+    await ensurePermission();
+    const base64 = dataUrl.split(',')[1];
+
+    if (Platform.OS === 'android' || Platform.OS === 'ios') {
+      await CameraRoll.save(dataUrl, { type: 'photo', album: 'ImagenApp' });
+      if (!autoDownload) {
+        Alert.alert('Saved', 'Gambar berhasil disimpan ke gallery');
+      }
+    } else {
+      const folder = saveDir;
+      if (!(await RNFS.exists(folder))) {
+        await RNFS.mkdir(folder);
+      }
+      const path = `${folder}/${filename}`;
+      await RNFS.writeFile(path, base64, 'base64');
+      if (!autoDownload) {
+        Alert.alert('Saved', `Disimpan di:\n${path}`);
+      }
+    }
+  };
+
+  // Generate satu prompt
+  const generateImagesForPrompt = async prompt => {
+    const body = {
+      userInput: { candidatesCount: 4, prompts: [prompt], seed: Date.now() % 1e6 },
+      clientContext: { sessionId: `;${Date.now()}`, tool: 'IMAGE_FX' },
+      modelInput: { modelNameType: 'IMAGEN_3_1' },
+      aspectRatio: aspect,
+    };
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        accept: '*/*',
+        authorization: `Bearer ${bearerToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error('Response bukan JSON valid');
+    }
+    if (!res.ok) {
+      let msg = data.error?.message || `HTTP ${res.status}`;
+      if (res.status === 401) msg = 'Token invalid/kadaluarsa';
+      else if (res.status === 429) msg = 'Rate limit exceeded';
+      throw new Error(msg);
+    }
+    if (!data.imagePanels?.length) {
+      throw new Error('No images dihasilkan.');
+    }
+    return data.imagePanels[0].generatedImages.map((img, i) => ({
+      filename: `img_${Date.now()}_${i + 1}.jpg`,
+      url: `data:image/jpeg;base64,${img.encodedImage}`,
+    }));
+  };
+
+  // Loop generate + auto/manual save
+  const generateForPrompts = async lines => {
+    if (!lines.length) {
+      setLogs([{ id: Date.now(), prompt: '', status: 'error', message: '⚠️ Prompt kosong' }]);
       return;
     }
-
     setIsGenerating(true);
     cancelRef.current = false;
+    setLogs([]);
 
     for (let i = 0; i < lines.length; i++) {
       if (cancelRef.current) break;
       const prompt = lines[i];
-      const logId = Date.now() + i;
-
-      setLogs((l) => [...l, { id: logId, prompt, status: 'pending' }]);
+      const id = Date.now() + i;
+      setLogs(l => [...l, { id, prompt, status: 'pending' }]);
 
       try {
-        const controller = new AbortController();
-        setAbortController(controller);
+        const images = await generateImagesForPrompt(prompt);
 
-        const token = await AsyncStorage.getItem('token');
-
-        const res = await fetch('/api/generate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ prompt, aspectRatio: aspect }),
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          let errorMessage = 'Failed to generate';
-          try {
-            const errorData = await res.json();
-            if (errorData.error) {
-              errorMessage = errorData.error;
-            } else if (errorData.message) {
-              errorMessage = errorData.message;
-            }
-          } catch {
-            // ignore JSON parse errors
+        if (autoDownload) {
+          for (const img of images) {
+            try { await saveImage(img.url, img.filename); }
+            catch (_) { }
           }
-          throw new Error(errorMessage);
         }
 
-        const data = await res.json();
-
-        setLogs((l) =>
-          l.map((x) =>
-            x.id === logId ? { ...x, status: 'success', images: data.images } : x
+        setLogs(l =>
+          l.map(x =>
+            x.id === id
+              ? {
+                ...x,
+                status: 'success',
+                images,
+                message: autoDownload
+                  ? '✅ Gambar disimpan otomatis'
+                  : '✅ Selesai, gunakan tombol Download'
+              }
+              : x
           )
         );
-
-        if (autoDownload && Platform.OS !== 'web') {
-          data.images.forEach((img: any, idx: number) =>
-            setTimeout(async () => {
-              try {
-                const path = `${FileSystem.DocumentDirectoryPath}/${img.filename}`;
-                await FileSystem.downloadFile({
-                  fromUrl: img.url,
-                  toFile: path,
-                }).promise;
-              } catch (err) {
-                console.error('Download error:', err);
-              }
-            }, idx * 1200)
-          );
-        }
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
-          setLogs((l) =>
-            l.map((x) =>
-              x.id === logId
-                ? {
-                    ...x,
-                    status: 'error',
-                    message: ' Dibatalkan oleh pengguna.',
-                  }
-                : x
-            )
-          );
-        } else {
-          setLogs((l) =>
-            l.map((x) =>
-              x.id === logId
-                ? {
-                    ...x,
-                    status: 'error',
-                    message: err.message || 'Unknown error',
-                  }
-                : x
-            )
-          );
-        }
+      } catch (e) {
+        setLogs(l =>
+          l.map(x =>
+            x.id === id
+              ? { ...x, status: 'error', message: e.message }
+              : x
+          )
+        );
       }
     }
 
     setIsGenerating(false);
-    setAbortController(null);
   };
 
-  const handleGenerate = async () => {
+  // tombol Generate / Stop
+  const onGenerate = () => {
     if (isGenerating) {
       cancelRef.current = true;
-      abortController?.abort();
       setIsGenerating(false);
-      setAbortController(null);
-      return;
+    } else {
+      const lines = prompts.split('\n').map(s => s.trim()).filter(Boolean);
+      generateForPrompts(lines);
     }
-
-    const lines = prompts
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    setLogs([]);
-    await generateForPrompts(lines);
-    setLogs((l) => [
-      ...l,
-      {
-        id: Date.now() + 9999,
-        prompt: '',
-        status: 'success',
-        message: '✅ Semua prompt selesai diproses.',
-      },
-    ]);
   };
 
-  const retryPrompt = async (prompt: string) => {
-    setLogs((l) => l.filter((x) => !(x.prompt === prompt && x.status === 'error')));
-    await generateForPrompts([prompt]);
+  // Baca isi direktori untuk picker
+  const readDir = async dir => {
+    try {
+      const list = await RNFS.readDir(dir);
+      setEntries(list.filter(e => e.isDirectory()));
+      setCurrentDir(dir);
+    } catch {
+      Alert.alert('Error', 'Gagal baca folder');
+    }
   };
-
-  const retryAllFailed = async () => {
-    const failed = logs.filter((x) => x.status === 'error').map((x) => x.prompt);
-    if (!failed.length) return;
-    setLogs((l) => l.filter((x) => x.status !== 'error'));
-    await generateForPrompts(failed);
-  };
-
-  const handleLogout = async () => {
-    await AsyncStorage.multiRemove(['token', 'expiresAt']);
-    navigation.replace('Login');
-  };
+  useEffect(() => {
+    if (pickerVisible) readDir(currentDir);
+  }, [pickerVisible]);
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
+      {/* Sidebar */}
       <View style={styles.sidebar}>
         <View style={styles.header}>
-          <TouchableOpacity style={styles.expiryButton}>
-            <Text style={styles.expiryText}>Expired: {expiresAtDisplay || '-'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={handleLogout} style={styles.logoutButton}>
+          <Text style={styles.expiredText}>Expired: {expiresAtDisplay || '-'}</Text>
+          <TouchableOpacity
+            style={styles.logoutBtn}
+            onPress={async () => {
+              await AsyncStorage.multiRemove(['token', 'expiresAt']);
+              navigation.replace('Login');
+            }}
+          >
             <Text style={styles.logoutText}>Logout</Text>
           </TouchableOpacity>
         </View>
 
-        <View style={styles.controls}>
-          <Text style={styles.label}>Describe the image you want to generate</Text>
-          <TextInput
-            style={styles.promptInput}
-            multiline
-            value={prompts}
-            onChangeText={setPrompts}
-            placeholder="Prompt 1\nPrompt 2\nPrompt 3"
-            placeholderTextColor="#666"
-          />
+        <TextInput
+          style={styles.textarea}
+          multiline
+          value={prompts}
+          onChangeText={setPrompts}
+          editable={!isGenerating}
+          placeholder="Prompt 1\nPrompt 2\nPrompt 3"
+          placeholderTextColor="#666"
+        />
 
-          <Text style={styles.label}>Aspect ratio</Text>
-          <View style={styles.aspectContainer}>
-            <Picker
-              selectedValue={aspect}
-              onValueChange={setAspect}
-              style={styles.aspectPicker}
-            >
-              {ASPECT_OPTIONS.map(option => (
-                <Picker.Item
-                  key={option.value}
-                  label={option.label}
-                  value={option.value}
-                  color="#fff"
-                />
-              ))}
-            </Picker>
-          </View>
-
-          <TouchableOpacity
-            style={[
-              styles.generateButton,
-              (isGenerating || !prompts.trim()) && styles.generateButtonDisabled,
-            ]}
-            onPress={handleGenerate}
-            disabled={!prompts.trim()}
-          >
-            {isGenerating ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.generateButtonText}>Generate</Text>
-            )}
-          </TouchableOpacity>
-
-          {Platform.OS !== 'web' && (
-            <View style={styles.autoDownloadContainer}>
-              <Text style={styles.label}>Auto-download</Text>
+        <View style={styles.aspectRow}>
+          {ASPECT_OPTIONS.map(opt => {
+            const active = opt.value === aspect;
+            return (
               <TouchableOpacity
-                style={[styles.switch, autoDownload && styles.switchActive]}
-                onPress={() => setAutoDownload(!autoDownload)}
+                key={opt.value}
+                onPress={() => setAspect(opt.value)}
+                disabled={isGenerating}
+                style={[
+                  styles.aspectBtn,
+                  active ? styles.aspectActive : styles.aspectInactive,
+                ]}
               >
-                <View style={[styles.switchThumb, autoDownload && styles.switchThumbActive]} />
+                <Text style={active ? styles.aspectTextActive : styles.aspectTextInactive}>
+                  {opt.label}
+                </Text>
               </TouchableOpacity>
-            </View>
-          )}
+            );
+          })}
         </View>
 
-        {logs.some((x) => x.status === 'error') && (
-          <TouchableOpacity
-            style={styles.retryButton}
-            onPress={retryAllFailed}
+        <View style={styles.switchRow}>
+          <Text style={styles.switchLabel}>Auto‐download</Text>
+          <Switch
+            value={autoDownload}
+            onValueChange={setAutoDownload}
             disabled={isGenerating}
-          >
-            <Text style={styles.retryButtonText}>Retry All Failed</Text>
+          />
+        </View>
+
+        <TouchableOpacity
+          style={[styles.btn, isGenerating ? styles.btnStop : styles.btnGo]}
+          onPress={onGenerate}
+        >
+          {isGenerating
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={styles.btnText}>Generate</Text>}
+        </TouchableOpacity>
+
+        {/* Input Bearer Token */}
+        <TextInput
+          style={styles.tokenInput}
+          placeholder="Masukkan Bearer Token"
+          placeholderTextColor="#666"
+          value={bearerToken}
+          onChangeText={setBearerToken}
+          editable={!isGenerating}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+
+        <View style={styles.folderRow}>
+          <TouchableOpacity onPress={() => setPickerVisible(true)}>
+            <Text style={styles.folderIcon}>📁</Text>
           </TouchableOpacity>
-        )}
+          <Text style={styles.folderPath} numberOfLines={1}>
+            {saveDir}
+          </Text>
+        </View>
       </View>
 
-      <ScrollView 
-        style={styles.mainContent} 
-        ref={bottomRef}
-        contentContainerStyle={logs.length === 0 ? styles.emptyStateContainer : undefined}
+      {/* Main */}
+      <ScrollView
+        ref={scrollRef}
+        style={styles.main}
+        contentContainerStyle={styles.logsContainer}
       >
         {logs.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Image
-              source={{ uri: 'https://sf16-web-tos-buz.capcutstatic.com/obj/capcut-web-buz-sg/ies/lvweb/mweb_online_new_frame/static/image/mweb-story-guide-bg-image.ff08b4ac.png' }}
-              style={styles.emptyStateImage}
-              resizeMode="contain"
-            />
-            <Text style={styles.emptyStateText}>Generated results will appear here</Text>
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>Hasil akan muncul di sini</Text>
           </View>
-        ) : (
-          <View style={styles.logList}>
-            {logs.map((log) => (
-              <View key={log.id} style={styles.logEntry}>
-                {log.prompt ? (
-                  <>
-                    <View style={styles.logHeader}>
-                      <Text style={styles.promptText}>Prompt: {log.prompt}</Text>
-                      {log.status === 'pending' && <ActivityIndicator />}
-                      {log.status === 'success' && log.images && (
-                        <Text style={styles.successText}>
-                          ✅ Berhasil. {log.images.length} gambar.
-                        </Text>
-                      )}
-                      {log.status === 'error' && (
-                        <Text style={styles.errorText}>❌ {log.message}</Text>
-                      )}
-                      {log.status === 'error' && (
-                        <TouchableOpacity
-                          style={styles.retryPromptButton}
-                          onPress={() => retryPrompt(log.prompt)}
-                        >
-                          <Text style={styles.retryPromptButtonText}>Retry</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                    {log.images && (
-                      <ScrollView horizontal style={styles.imagesContainer}>
-                        {log.images.map((img, idx) => (
-                          <View key={idx} style={styles.imageWrapper}>
-                            <Image 
-                              source={{ uri: img.url }} 
-                              style={styles.generatedImage}
-                              resizeMode="cover"
-                            />
-                            {Platform.OS !== 'web' && (
-                              <TouchableOpacity
-                                style={styles.downloadButton}
-                                onPress={async () => {
-                                  try {
-                                    const path = `${FileSystem.DocumentDirectoryPath}/${img.filename}`;
-                                    await FileSystem.downloadFile({
-                                      fromUrl: img.url,
-                                      toFile: path,
-                                    }).promise;
-                                  } catch (err) {
-                                    console.error('Download error:', err);
-                                  }
-                                }}
-                              >
-                                <Text style={styles.downloadButtonText}>Download</Text>
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        ))}
-                      </ScrollView>
+        ) : logs.map(log => (
+          <View key={log.id} style={styles.logItem}>
+            <View style={styles.logHeader}>
+              <Text style={styles.promptText}>{log.prompt}</Text>
+              {log.status === 'pending' && <ActivityIndicator size="small" color="#3D7BFF" />}
+              {log.status === 'success' && (
+                <Text style={styles.successText}>✅ {log.message}</Text>
+              )}
+              {log.status === 'error' && (
+                <Text style={styles.errorText}>❌ {log.message}</Text>
+              )}
+            </View>
+            {log.images && (
+              <View style={styles.imagesRow}>
+                {log.images.map((img, i) => (
+                  <View key={i} style={styles.imageWrapper}>
+                    <Image source={{ uri: img.url }} style={styles.image} />
+                    <Text style={styles.imageName}>{img.filename}</Text>
+                    {!autoDownload && (
+                      <TouchableOpacity
+                        style={styles.btnDownload}
+                        onPress={() => saveImage(img.url, img.filename)}
+                      >
+                        <Text style={styles.downloadText}>Download</Text>
+                      </TouchableOpacity>
                     )}
-                  </>
-                ) : (
-                  <Text style={styles.messageText}>{log.message}</Text>
-                )}
+                  </View>
+                ))}
               </View>
-            ))}
+            )}
           </View>
-        )}
+        ))}
       </ScrollView>
-    </View>
+
+      {pickerVisible && (
+        <View style={styles.overlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>Pilih Folder</Text>
+            <Text style={styles.modalPath}>{currentDir}</Text>
+            <ScrollView style={styles.modalList}>
+              <TouchableOpacity
+                style={styles.modalItem}
+                onPress={() => {
+                  const parent = currentDir.replace(/\/[^\/]+$/, '');
+                  readDir(parent);
+                }}
+              >
+                <Text style={styles.modalItemText}>.. (Naik)</Text>
+              </TouchableOpacity>
+              {entries.map((e, i) => (
+                <TouchableOpacity
+                  key={i}
+                  style={styles.modalItem}
+                  onPress={() => readDir(e.path)}
+                >
+                  <Text style={styles.modalItemText}>{e.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity
+                style={styles.btnModalCancel}
+                onPress={() => setPickerVisible(false)}
+              >
+                <Text style={styles.btnText}>Batal</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.btnModalSelect}
+                onPress={() => {
+                  setSaveDir(currentDir);
+                  setPickerVisible(false);
+                }}
+              >
+                <Text style={styles.btnText}>Pilih</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+    </SafeAreaView>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
-    backgroundColor: '#18191F',
-  },
-  sidebar: {
-    width: Platform.OS === 'web' ? 300 : '100%',
-    backgroundColor: '#1C1E2B',
-    padding: 16,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  expiryButton: {
-    backgroundColor: '#2E3042',
-    padding: 8,
-    borderRadius: 20,
-  },
-  expiryText: {
-    color: '#fff',
-    fontSize: 12,
-  },
-  logoutButton: {
-    backgroundColor: '#ff4444',
-    padding: 8,
-    borderRadius: 20,
-  },
-  logoutText: {
-    color: '#fff',
-    fontSize: 12,
-  },
-  controls: {
-    flex: Platform.OS === 'web' ? 1 : undefined,
-  },
-  label: {
-    color: '#999',
-    marginBottom: 8,
-    fontSize: 14,
-  },
-  promptInput: {
-    backgroundColor: 'rgba(46, 48, 66, 0.4)',
-    borderWidth: 1,
-    borderColor: '#3A3C4D',
-    borderRadius: 8,
-    padding: 12,
-    color: '#fff',
-    height: 100,
-    textAlignVertical: 'top',
-    marginBottom: 16,
-  },
-  aspectContainer: {
-    backgroundColor: '#2E3042',
-    borderRadius: 8,
-    marginBottom: 16,
-    overflow: 'hidden',
-  },
-  aspectPicker: {
-    color: '#fff',
-  },
-  generateButton: {
-    backgroundColor: '#3D7BFF',
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  generateButtonDisabled: {
-    backgroundColor: '#3A3C4D',
-    opacity: 0.5,
-  },
-  generateButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  autoDownloadContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 16,
-  },
-  switch: {
-    width: 40,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#3A3C4D',
-    padding: 2,
-  },
-  switchActive: {
-    backgroundColor: '#3D7BFF',
-  },
-  switchThumb: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#fff',
-  },
-  switchThumbActive: {
-    transform: [{ translateX: 16 }],
-  },
-  mainContent: {
-    flex: 1,
-  },
-  emptyStateContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderColor: '#2E3042',
-    borderRadius: 8,
-    padding: 20,
-    margin: 16,
-  },
-  emptyStateImage: {
-    width: 200,
-    height: 200,
-    marginBottom: 16,
-  },
-  emptyStateText: {
-    color: '#666',
-  },
-  logList: {
-    padding: 16,
-    gap: 16,
-  },
-  logEntry: {
-    backgroundColor: 'rgba(255, 255, 255, 0.07)',
-    borderLeftWidth: 4,
-    borderLeftColor: '#fff',
-    padding: 16,
-    borderRadius: 8,
-  },
-  logHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  promptText: {
-    color: '#fff',
-    flex: 1,
-  },
-  successText: {
-    color: '#4CAF50',
-  },
-  errorText: {
-    color: '#ff4444',
-  },
-  messageText: {
-    color: '#fff',
-    fontWeight: 'bold',
-  },
-  imagesContainer: {
-    marginTop: 12,
-  },
-  imageWrapper: {
-    marginRight: 12,
-    alignItems: 'center',
-  },
-  generatedImage: {
-    width: 180,
-    height: 180,
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  downloadButton: {
-    backgroundColor: '#FFB300',
-    paddingVertical: 4,
-    paddingHorizontal: 12,
-    borderRadius: 4,
-  },
-  downloadButtonText: {
-    color: '#000',
-    fontSize: 12,
-  },
-  retryButton: {
-    backgroundColor: '#673AB7',
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 16,
-  },
-  retryButtonText: {
-    color: '#fff',
-    fontWeight: 'bold',
-  },
-  retryPromptButton: {
-    backgroundColor: '#3D7BFF',
-    paddingVertical: 4,
-    paddingHorizontal: 12,
-    borderRadius: 4,
-  },
-  retryPromptButtonText: {
-    color: '#fff',
-    fontSize: 12,
-  },
-});
+  container: { flex: 1, flexDirection: 'row', backgroundColor: '#121419' },
+  sidebar: { width: 280, padding: 12, backgroundColor: '#1C1E2B' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
+  expiredText: { color: '#A0AEC0' },
+  logoutBtn: { backgroundColor: '#fff', padding: 6, borderRadius: 4 },
+  logoutText: { color: '#000', fontWeight: 'bold' },
 
-export default ImageGeneratorScreen;
+  textarea: {
+    backgroundColor: 'rgba(46,48,66,0.25)',
+    borderRadius: 8,
+    padding: 8,
+    color: '#fff',
+    height: 200,
+    textAlignVertical: 'top',
+    marginBottom: 12
+  },
+
+  aspectRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 },
+  aspectBtn: { padding: 8, borderRadius: 6, margin: 4 },
+  aspectActive: { backgroundColor: '#3A3C4D', borderWidth: 1, borderColor: '#fff' },
+  aspectInactive: { backgroundColor: '#2E3042' },
+  aspectTextActive: { color: '#fff' },
+  aspectTextInactive: { color: '#A0AEC0' },
+
+  switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  switchLabel: { color: '#A0AEC0' },
+
+  btn: { padding: 12, borderRadius: 8, alignItems: 'center', marginBottom: 12 },
+  btnGo: { backgroundColor: '#3D7BFF' },
+  btnStop: { backgroundColor: '#E53E3E' },
+  btnText: { color: '#fff', fontWeight: 'bold' },
+
+  tokenInput: {
+    backgroundColor: 'rgba(46,48,66,0.25)',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    color: '#fff',
+    marginBottom: 12,
+    fontSize: 12
+  },
+
+  folderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  folderIcon: { fontSize: 20, marginRight: 8, color: '#fff' },
+  folderPath: { color: '#A0AEC0', flex: 1, fontSize: 12 },
+
+  main: { flex: 1, padding: 12 },
+  logsContainer: { paddingBottom: 24 },
+  empty: {
+    flex: 1, justifyContent: 'center', alignItems: 'center',
+    borderWidth: 1, borderStyle: 'dashed', borderColor: '#2E3042',
+    borderRadius: 8, padding: 20
+  },
+  emptyText: { color: '#718096' },
+
+  logItem: {
+    marginBottom: 16,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderLeftWidth: 4, borderLeftColor: '#fff',
+    borderRadius: 6, padding: 12
+  },
+  logHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  promptText: { flex: 1, color: '#fff', fontWeight: '600' },
+  successText: { color: '#48BB78', marginLeft: 8 },
+  errorText: { color: '#F56565', marginLeft: 8 },
+
+  imagesRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 8 },
+  imageWrapper: { margin: 4, alignItems: 'center' },
+  image: { width: 100, height: 100, borderRadius: 6 },
+  imageName: { color: '#fff', fontSize: 10, marginTop: 4, marginBottom: 4 },
+
+  btnDownload: { paddingVertical: 4, paddingHorizontal: 8, backgroundColor: '#3D7BFF', borderRadius: 4 },
+  downloadText: { color: '#fff', fontSize: 12 },
+
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center', alignItems: 'center'
+  },
+  modalBox: {
+    width: '80%', maxHeight: '80%',
+    backgroundColor: '#1C1E2B', borderRadius: 8, padding: 12
+  },
+  modalTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 6 },
+  modalPath: { color: '#A0AEC0', fontSize: 12, marginBottom: 6 },
+  modalList: { maxHeight: 200, marginBottom: 12 },
+  modalItem: { padding: 8, borderBottomWidth: 1, borderBottomColor: '#2E3042' },
+  modalItemText: { color: '#fff' },
+  modalFooter: { flexDirection: 'row', justifyContent: 'flex-end' },
+  btnModalCancel: { marginRight: 8, padding: 10, backgroundColor: '#2E3042', borderRadius: 6 },
+  btnModalSelect: { padding: 10, backgroundColor: '#3D7BFF', borderRadius: 6 },
+});

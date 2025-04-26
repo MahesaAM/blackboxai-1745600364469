@@ -11,6 +11,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList } from '../../App';
+import { supabase } from '../lib/supabase';
 
 type LoginScreenProps = {
   navigation: StackNavigationProp<RootStackParamList, 'Login'>;
@@ -22,41 +23,39 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  useEffect(() => {
-    const checkBearerToken = async () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const bearer = urlParams.get('bearer');
-      if (bearer) {
-        await AsyncStorage.setItem('bearer', bearer);
-      }
-    };
-    checkBearerToken();
-  }, []);
 
   const handleSubmit = async () => {
     setError('');
     setIsLoading(true);
 
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
+      const { data, error } = await supabase
+        .from('users_imagen')
+        .select('*')
+        .eq('username', username)
+        .eq('password', password);
 
-      if (!res.ok) {
-        const data = await res.json();
-        setError(data.error || 'Login failed');
+      if (error) {
+        setError(error.message || 'Login failed');
         setIsLoading(false);
         return;
       }
 
-      const data = await res.json();
-      await AsyncStorage.setItem('token', data.token);
-      if (data.expiresAt) {
-        await AsyncStorage.setItem('expiresAt', data.expiresAt);
+      if (!data || data.length === 0) {
+        setError('Invalid username or password');
+        setIsLoading(false);
+        return;
       }
-      navigation.replace(data.token === 'admin-token' ? 'Admin' : 'ImageGenerator');
+
+      const user = data[0];
+      const token = user.isAdmin ? 'admin-token' : 'user-token';
+
+      await AsyncStorage.setItem('token', token);
+      await AsyncStorage.setItem('username', username);
+      if (user.expiresAt) {
+        await AsyncStorage.setItem('expiresAt', user.expiresAt);
+      }
+      navigation.replace(token === 'admin-token' ? 'Admin' : 'ImageGenerator');
     } catch (err) {
       setError('An unexpected error occurred');
       setIsLoading(false);
